@@ -1,0 +1,6 @@
+{
+  "service": "fts",
+  "proxy-strategy": "local",
+  "rest-api-prefix": "fts",
+  "doc-root": "fts"
+}

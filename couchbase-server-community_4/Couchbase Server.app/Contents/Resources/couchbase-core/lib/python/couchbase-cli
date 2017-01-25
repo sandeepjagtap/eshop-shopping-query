@@ -1,0 +1,310 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+couchbase-cli - command-line cluster administration tool
+"""
+
+import getopt
+import sys
+import os
+
+import listservers
+import buckets
+import node
+import xdcr
+import info
+import util_cli as util
+import usage
+from timeout import TimeoutException
+
+CB_USERNAME = 'CB_REST_USERNAME'
+CB_PASSWORD = 'CB_REST_PASSWORD'
+
+def main():
+
+    debug = False
+
+    (cluster, user, password, ssl) = ('', '', '', False)
+
+    try:
+        (opts, _args) = getopt.getopt(sys.argv[2:],
+                                     'a:b:c:dse:gdlmo:OPp:r:Ssu:vVhH', [
+                'cluster=',
+                'debug',
+                'storage',
+                'password=',
+                'user=',
+                'mem',
+                'output=',
+                'os',
+                'ports',
+                'stats',
+                'license',
+                'server-add=',
+                'server-add-username=',
+                'server-add-password=',
+                'server-remove=',
+                'server-failover=',
+                'server-recovery=',
+                'cluster-init=',
+                'cluster-init-username=',
+                'cluster-username=',
+                'cluster-init-password=',
+                'cluster-password=',
+                'cluster-init-port=',
+                'cluster-port=',
+                'cluster-init-ramsize=',
+                'cluster-ramsize=',
+                'cluster-name=',
+                'cluster-index-ramsize=',
+                'cluster-fts-ramsize=',
+                'index-storage-setting=',
+                'enable-auto-failover=',
+                'auto-failover-timeout=',
+                'enable-notification=',
+                'enable-email-alert=',
+                'compaction-db-percentage=',
+                'compaction-db-size=',
+                'compaction-view-percentage=',
+                'compaction-view-size=',
+                'compaction-period-from=',
+                'compaction-period-to=',
+                'enable-compaction-abort=',
+                'enable-compaction-parallel=',
+                'metadata-purge-interval=',
+                'node-init=',
+                'node-init-data-path=',
+                'node-init-index-path=',
+                'node-init-hostname=',
+                'bucket=',
+                'bucket-type=',
+                'bucket-port=',
+                'bucket-password=',
+                'bucket-ramsize=',
+                'bucket-replica=',
+                'bucket-priority=',
+                'bucket-eviction-policy=',
+                'enable-flush=',
+                'enable-index-replica=',
+                'wait',
+                'force',
+                'data-only',
+                'view-only',
+                'version',
+                'xdcr-cluster-name=',
+                'xdcr-hostname=',
+                'xdcr-username=',
+                'xdcr-password=',
+                'xdcr-from-bucket=',
+                'xdcr-to-bucket=',
+                'xdcr-replicator=',
+                'xdcr-replication-mode=',
+                'xdcr-demand-encryption=',
+                'xdcr-certificate=',
+                'create',
+                'edit',
+                'delete',
+                'list',
+                'set',
+                'pause',
+                'resume',
+                'settings',
+                'ro-username=',
+                'ro-password=',
+                'checkpoint-interval=',
+                'worker-batch-size='
+                'doc-batch-size=',
+                'failure-restart-interval=',
+                'optimistic-replication-threshold=',
+                'source-nozzle-per-node=',
+                'target-nozzle-per-node=',
+                'log-level=',
+                'stats-interval=',
+                'email-recipients=',
+                'email-sender=',
+                'email-user=',
+                'email-password=',
+                'email-host=',
+                'email-port=',
+                'enable-email-encrypt=',
+                'alert-auto-failover-node',
+                'alert-auto-failover-max-reached',
+                'alert-auto-failover-node-down',
+                'alert-auto-failover-cluster-small',
+                'alert-auto-failover-disabled',
+                'alert-ip-changed',
+                'alert-disk-space',
+                'alert-meta-overhead',
+                'alert-meta-oom',
+                'alert-write-failed',
+                'alert-audit-msg-dropped',
+                'group-name=',
+                'rename=',
+                'add-servers=',
+                'move-servers=',
+                'from-group=',
+                'to-group=',
+                'retrieve-cert=',
+                'regenerate-cert=',
+                'cluster-cert-info',
+                'node-cert-info',
+                'upload-cluster-ca=',
+                'set-node-certificate',
+                'extended',
+                'recovery-type=',
+                'recovery-buckets=',
+                'nodes=',
+                'all-nodes',
+                'upload',
+                'upload-host=',
+                'customer=',
+                'ticket=',
+                'services=',
+                'help',
+                'ssl',
+                'filter-expression=',
+                'audit-enabled=',
+                'audit-log-path=',
+                'audit-log-rotate-interval=',
+                'ldap-enabled=',
+                'ldap-admins=',
+                'ldap-roadmins=',
+                'ldap-default=',
+                'index-max-rollback-points=',
+                'index-stable-snapshot-interval=',
+                'index-memory-snapshot-interval=',
+                'index-threads=',
+                'index-log-level=',
+                'vm=',
+                'get-roles',
+                'roles=',
+                'my-roles',
+                'set-users=',
+                'set-names=',
+                'delete-users=',
+                ])
+    except getopt.GetoptError, err:
+        usage.command_error(err)
+    if len(_args) > 0:
+        err_message = ("Possible missing '--' in front of one of parameters '%s'," +
+                       " please see -h for more help.") % _args
+        usage.command_error(err_message)
+    commands = {
+        'host-list'         : listservers.ListServers,
+        'server-list'       : listservers.ListServers,
+        'server-info'       : info.Info,
+        'server-eshell'     : info.Info,
+        'server-add'        : node.Node,
+        'server-readd'      : node.Node,
+        'group-manage'      : node.Node,
+        'rebalance'         : node.Node,
+        'rebalance-stop'    : node.Node,
+        'rebalance-status'  : node.Node,
+        'eject-server'      : node.Node,
+        'failover'          : node.Node,
+        'recovery'          : node.Node,
+        'cluster-init'      : node.Node,
+        'cluster-edit'      : node.Node,
+        'ssl-manage'        : node.Node,
+        'node-init'         : node.Node,
+        'user-manage'       : node.Node,
+        'collect-logs-start'  : node.Node,
+        'collect-logs-stop'   : node.Node,
+        'collect-logs-status' : node.Node,
+        'bucket-list'       : buckets.Buckets,
+        'bucket-create'     : buckets.Buckets,
+        'bucket-edit'       : buckets.Buckets,
+        'bucket-delete'     : buckets.Buckets,
+        'bucket-flush'      : buckets.Buckets,
+        'bucket-compact'    : buckets.Buckets,
+        'setting-cluster'   : node.Node,
+        'setting-compaction'    : node.Node,
+        'setting-notification'  : node.Node,
+        'setting-autofailover'  : node.Node,
+        'setting-alert'         : node.Node,
+        'setting-audit'         : node.Node,
+        'setting-ldap'          : node.Node,
+        'admin-role-manage'     : node.Node,
+        'setting-xdcr'          : xdcr.XDCR,
+        'setting-index'         : node.Node,
+        'xdcr-setup'            : xdcr.XDCR,
+        'xdcr-replicate'        : xdcr.XDCR,
+        'help'                  : usage.Usage
+        }
+
+    if len(sys.argv) <= 1:
+        usage.short_usage(commands)
+
+    cmd = sys.argv[1]
+
+    if cmd not in commands:
+        # cmd not a command, maybe help is needed.
+        for x in sys.argv:
+            if x in ('-h', '-H', '--help'):
+                usage.all_help(commands) # exits program.
+
+        err_message = ("'%s' is not a couchbase-cli command;" +
+                       " please see -h for more help.") % cmd
+        usage.command_error(err_message) # exits program.
+
+    if cmd == "help":
+        usage.all_help(commands)
+
+    # If a command and -h,-H,--help give context sensitive help by passing cmd
+    for x in sys.argv:
+        if x in ('-h', '-H', '--help'):
+            usage.one_command_usage(cmd, commands)
+
+    for (opt, arg) in opts:
+        if opt in ('-c', '--cluster'):
+            cluster = arg
+        if opt in ('-u', '--user'):
+            user = arg
+        if opt in ('-p', '--password'):
+            password = arg
+        if opt in ('-d', '--debug'):
+            debug = True
+        if opt in ('-s', '--ssl'):
+            ssl = True
+
+    if cmd == "cluster-init" and not cluster:
+        cluster = "127.0.0.1:8091"
+
+    if not cluster:
+        usage.command_error("please provide a CLUSTER, or use -h for more help.")
+
+    if cmd != "cluster-init":
+        if not user:
+            if CB_USERNAME in os.environ:
+                user = os.environ[CB_USERNAME]
+            else:
+                usage.command_error("Username cannot be empty. \
+Please use -u or set environment variable %s."  % CB_USERNAME)
+        if not password:
+            if CB_PASSWORD in os.environ:
+                password = os.environ[CB_PASSWORD]
+            else:
+                usage.command_error("Password cannot be empty. \
+Please use -p or set environment variable %s." % CB_PASSWORD)
+
+    server, port = util.hostport(cluster)
+
+    if debug:
+        print "INFO: running command: %s" % cmd
+
+    c = commands[cmd]()
+    try:
+        c.runCmd(cmd, server, port, user, password, ssl, opts)
+    except TimeoutException, err:
+        print "TIMED OUT: command: %s: %s:%d, %s" % (cmd, server, port, err)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print "INTERRUPTED: command: %s: %s:%d" % (cmd, server, port)
+        sys.exit(1)
+    except Exception, err:
+        print "ERROR: command: %s: %s:%d, %s" % (cmd, server, port, err)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

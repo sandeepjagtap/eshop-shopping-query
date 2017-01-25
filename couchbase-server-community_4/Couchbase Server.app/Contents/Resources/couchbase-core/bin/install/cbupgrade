@@ -1,0 +1,486 @@
+#!/usr/bin/env python
+# -*-python-*-
+
+import os
+import sys
+import glob
+import getopt
+import platform
+import re
+import shutil
+import string
+import subprocess
+
+if platform.system() == 'Linux':
+    python_lib = os.path.join(os.path.dirname(__file__), '../../lib/python')
+    sys.path.append(python_lib)
+import_stmts = (
+    'from pysqlite2 import dbapi2 as sqlite3',
+    'import sqlite3',
+)
+for status, stmt in enumerate(import_stmts):
+    try:
+        exec stmt
+        break
+    except ImportError:
+        status = None
+if status is None:
+    sys.exit("Error: could not import sqlite3 module")
+
+def usage(err=0):
+    print >> sys.stderr, """
+Usage: %s [-c path/to/previous/config/dir] [-a AUTO] [-d FILENAME] [-n] [-s FACTOR]
+
+  -c <path/to/previous/config/dir>
+       -- example: -c /opt/couchbase/var/lib/couchbase/config
+
+  -a <yes|no>
+       -- automatic or non-interactive mode; default is 'no';
+          'yes' to force automatic 'yes' answers to all questions
+
+  -d <dbdir_output_file>
+       -- retrieve db directory from config file and exit
+
+  -n   -- dry-run; don't actually change anything
+
+  -s <free_disk_space_needed_factor>
+       -- free disk space needed, as a factor of current bucket usage
+       -- default value is 2.0
+       -- example: -s 1.0
+""" % (os.path.basename(sys.argv[0]),)
+    sys.exit(err)
+
+def parse_args(args):
+    prev_cfg_dir = None
+    interactive  = True
+    dry_run      = False
+    space_needed_factor = 2.0
+    dbdir_file   = None
+
+    try:
+        opts, args = getopt.getopt(args, 'hc:a:nsd:', ['help'])
+    except getopt.GetoptError, e:
+        usage(e.msg)
+
+    for (o, a) in opts:
+        if o == '--help' or o == '-h':
+            usage()
+        elif o == '-c':
+            prev_cfg_dir = a
+        elif o == '-a':
+            interactive = re.match("y", a) == None
+        elif o == '-n':
+            dry_run = True
+        elif o == '-s':
+            space_needed_factor = float(a)
+        elif o == '-d':
+            dbdir_file = a
+        else:
+            usage("unknown option - " + o)
+
+    return prev_cfg_dir, interactive, dry_run, space_needed_factor, dbdir_file
+
+def find_cmd(cmdName):
+    cmd_dir = os.path.dirname(sys.argv[0])
+    possible = []
+    for bin_dir in [cmd_dir, os.path.join(cmd_dir, "..", "..", "bin")]:
+        possible = possible + [os.path.join(bin_dir, p) for p in [cmdName, cmdName + '.exe']]
+    try:
+        return (p for p in possible if os.path.exists(p)).next()
+    except StopIteration:
+        return ""
+
+def find_cfg(src_dir, root, patterns):
+    for pattern in patterns:
+        cfgs = list(set(glob.glob(os.path.join(src_dir, pattern)) + glob.glob(pattern)))
+        if len(cfgs) > 1:
+            sys.exit("Error: found multiple " + root + " candidates: " + str(cfgs))
+        if len(cfgs) == 1 and os.path.getsize(cfgs[0]) > 0:
+            return cfgs[0]
+
+    return None
+
+def copy_cfg(cfg, dst, dry_run=False, force=False):
+    normalize_cfg = os.path.normpath(cfg)
+    normalize_dst = os.path.normpath(dst)
+    if not force and os.path.exists(dst) and os.path.getsize(dst) > 0 and \
+            normalize_cfg != normalize_dst:
+        sys.exit("Error: " + dst + " already exists while copying " + cfg)
+
+    print(dry_run_prefix(dry_run) + "Copying " + cfg)
+    print(dry_run_prefix(dry_run) + "    cp " + cfg + " " + dst)
+    if not dry_run:
+        if normalize_cfg != normalize_dst:
+            shutil.copyfile(cfg, dst)
+
+    return True
+
+def dry_run_prefix(dry_run):
+    if dry_run:
+        return "SKIPPED (dry-run): "
+    return ""
+
+def prompt(msg, expect='yes'):
+    global interactive
+
+    if interactive:
+        print(msg)
+        if not re.match(expect, sys.stdin.readline()):
+            sys.exit("Did not receive a '" + expect + "', leaving.")
+
+def confirm(prefix_dir, prev_cfg_dir, prev_cfg, prev_ip,
+            dbdir, buckets):
+    print("\nCouchbase should not be running.")
+    if platform.system() == 'Windows':
+      print("  Please use the Control Panel to stop the Couchbase service.")
+    else:
+      print("  Please use: /etc/init.d/couchbase-server stop")
+    prompt("Is the Couchbase server already stopped? [yes|no]")
+
+    print("\nDatabase dir: " + dbdir)
+    prompt("Is that the expected database directory to upgrade? [yes|no]")
+
+    print("\nBuckets to upgrade: " + ",".join(buckets or ["[no buckets found]"]))
+    prompt("Are those the expected buckets to upgrade? [yes|no]")
+
+def upgrade(bin_dir, prefix_dir, prev_cfg_dir, prev_cfg, prev_ip, prev_ini,
+            dbdir, buckets, dry_run=False):
+    """File modification steps are grouped into this upgrade() function.
+    """
+
+    if prev_cfg:
+        copy_cfg(prev_cfg,
+                 os.path.join(prefix_dir,
+                              "var", "lib", "couchbase", "config", "config.dat"),
+                 dry_run=dry_run, force=True)
+    if prev_ip:
+        copy_cfg(prev_ip,
+                 os.path.join(prefix_dir,
+                              "var", "lib", "couchbase", "ip"),
+                 dry_run=dry_run, force=True)
+    if prev_ini:
+        if prev_ini.find("local.ini"):
+            copy_cfg(prev_ini,
+                     os.path.join(prefix_dir,
+                                  "etc", "couchdb", "local.ini"),
+                     dry_run=dry_run, force=True)
+        elif prev_ini.find("runtime.ini"):
+            copy_cfg(prev_ini,
+                     os.path.join(prefix_dir,
+                                  "etc", "runtime.ini"),
+                     dry_run=dry_run, force=True)
+
+    print("Ensuring bucket data directories.")
+    for bucket in buckets:
+        bucket_dir = dbdir + "/" + bucket
+
+        print(dry_run_prefix(dry_run) \
+              + "Ensuring bucket data directory: " + bucket_dir)
+        print(dry_run_prefix(dry_run) \
+              + "    mkdir -p " + bucket_dir)
+        if (not dry_run) and (not os.path.isdir(bucket_dir)):
+            os.makedirs(bucket_dir)
+
+    if platform.system() != 'Windows':
+        for x in [dbdir,
+                  "/opt/couchbase/var/lib/couchbase/data",
+                  "/opt/membase/var/lib/membase/data"]:
+            if os.path.exists(x):
+                cmd = ['chown', '-R', 'couchbase:couchbase', x]
+                print(dry_run_prefix(dry_run) + "Ensuring dbdir owner/group: " + x)
+                print(dry_run_prefix(dry_run) + "    " + " ".join(cmd))
+                if not dry_run:
+                    p = subprocess.Popen(cmd)
+                    err = os.waitpid(p.pid, 0)[1]
+                    if err != 0:
+                        sys.exit("ERROR: chown dbdir failed: " + x + " err: " + str(err))
+
+def bucket_files(bucket_path, bucket):
+    shards = glob.glob(os.path.join(bucket_path, bucket + "-*.mb")) \
+             + glob.glob(os.path.join(bucket_path, bucket + "-*.sqlite"))
+    shards.sort()
+    return [os.path.join(bucket_path, bucket)] + shards
+
+def get_free_space(path):
+    fs_stat = None
+    try:
+        fs_stat = os.statvfs(path)
+        return fs_stat.f_bsize * fs_stat.f_bavail
+    except:
+        pass
+
+    # http://stackoverflow.com/questions/51658/cross-platform-space-remaining-on-volume-using-python
+    #
+    if platform.system() == 'Windows':
+        import ctypes
+
+        free_bytes = ctypes.c_ulonglong(0)
+        ctypes.windll.kernel32.GetDiskFreeSpaceExW(ctypes.c_wchar_p(path),
+                                                   None, None,
+                                                   ctypes.pointer(free_bytes))
+        return free_bytes.value
+
+    return -1 # Don't know.
+
+def get_dbdir(parentdir="."):
+    for f in ["../etc/runtime.ini",
+              "../etc/couchdb/local.ini.debsave",
+              "../etc/couchdb/local.ini.rpmsave",
+              "../etc/couchdb/local.ini"]:
+        try:
+            path = os.path.join(parentdir, f)
+            for line in open(path):
+                if "database_dir = " in line:
+                    return string.strip(line.split("= ")[-1]), path
+        except:
+            pass
+
+    if platform.system() == 'Windows':
+        return "c:/Program Files/Couchbase/Server/var/lib/couchbase/data", None
+    else:
+        return "/opt/couchbase/var/lib/couchbase/data", None
+
+def main():
+    bin_dir = os.path.join(os.path.dirname(sys.argv[0]), '..')
+    prefix_dir = os.path.join(bin_dir, '..')
+
+    path = [bin_dir,
+            os.path.join(bin_dir, 'erlang', 'bin'),
+            os.environ['PATH']]
+
+    if os.name == 'posix':
+        os.environ['PATH'] = ':'.join(path)
+    elif os.name == 'nt':
+        os.environ['PATH'] = ';'.join(path)
+
+    global prev_cfg_dir, interactive, dry_run, space_needed_factor, dbdir_file
+
+    prev_cfg_dir, interactive, dry_run, space_needed_factor, dbdir_file = \
+       parse_args(sys.argv[1:])
+
+    if dry_run:
+        print("Dry-run mode: no actual upgrade changes will be made.")
+
+    if not interactive:
+        print("Automatic mode: running without interactive questions or confirmations.")
+
+    if not prev_cfg_dir:
+        sys.exit("Error: please provide a previous config directory path (-c path)")
+    if not os.path.isdir(prev_cfg_dir):
+        sys.exit("Error: previous config directory incorrect: " + prev_cfg_dir)
+
+    # ----------------------------------------------------
+
+    ver = None
+    ver_path = os.path.join(prefix_dir, "VERSION.txt")
+    try:
+        f = open(ver_path, 'r')
+        ver = f.read()
+        f.close()
+    except:
+        sys.exit("Unexpected: missing " + ver_path + " file")
+    if not ver:
+        sys.exit("Unexpected: empty " + ver_path)
+
+    print("Analysing...")
+
+    # ----------------------------------------------------
+
+    prev_cfg = find_cfg(prev_cfg_dir, "config.dat",
+                        # Look for something like /etc/opt/membase/ns_1/config.dat
+                        # Possibly config.dat.rpmsave or config.dat.debsave
+                        ['config.dat',
+                         'config.dat.*save',
+                         '/opt/couchbase/var/lib/couchbase/config/config.dat',
+                         '/opt/couchbase/var/lib/couchbase/config/config.dat.*save'])
+    if not prev_cfg:
+        print("Done: no previous config.dat found; nothing to upgrade.")
+        sys.exit(0)
+
+    print("Previous config.dat file is " + prev_cfg)
+
+    # ----------------------------------------------------
+
+    prev_ip = find_cfg(prev_cfg_dir, "ip", ['/opt/couchbase/var/lib/couchbase/ip_start.*save',
+                                            'var/lib/couchbase/ip_start.*save',
+                                            'ip_start.*save',
+                                            '/opt/couchbase/var/lib/couchbase/ip_start',
+                                            'var/lib/couchbase/ip_start',
+                                            'ip_start',
+                                            '/opt/couchbase/var/lib/couchbase/ip.*save',
+                                            'var/lib/couchbase/ip.*save',
+                                            'ip.*save',
+                                            '/opt/couchbase/var/lib/couchbase/ip',
+                                            'var/lib/couchbase/ip',
+                                            'ip'])
+    ip = None
+    if prev_ip:
+        try:
+            f = open(prev_ip, 'r')
+            ip = string.strip(f.read())
+            f.close()
+        except:
+            pass
+    if (not ip) or (len(ip) <= 0):
+        if platform.system() == 'Windows':
+            ip = subprocess.Popen(os.path.join(bin_dir, "ip_addr.bat"),
+                                  stdout=subprocess.PIPE).communicate()[0]
+        else:
+            ip = '127.0.0.1'
+    # ----------------------------------------------------
+
+    prev_ini = find_cfg(prev_cfg_dir, "local.ini",
+                        ['/opt/couchbase/etc/couchdb/local.ini.*save',
+                         'etc/couchdb/local.ini.*save',
+                         'local.ini.*save',
+                         '/opt/couchbase/etc/couchdb/local.ini',
+                         'etc/couchdb/local.ini',
+                         'local.ini'])
+
+    # ----------------------------------------------------
+    node = 'ns_1@' + ip
+
+    print("Target node: " + node)
+
+    escript_cmd = "escript"
+    if platform.system() == 'Windows':
+        escript_cmd = "escript.exe"
+
+    node_cfg = subprocess.Popen([escript_cmd,
+                                 os.path.join(bin_dir, "cbdump-config"),
+                                 prev_cfg, "node", node],
+                                stdout=subprocess.PIPE).communicate()[0]
+    node_cfg = string.strip(node_cfg)
+    if len(node_cfg) <= 0:
+        print("Done: previous node configuration is empty.")
+        sys.exit(0)
+
+    node_cfg = node_cfg.split("\n")
+
+    # ----------------------------------------------------
+
+    prev_ini = None
+    dbdir = None
+    for line in node_cfg:
+        m = re.match('\s*{dbdir,\s*"(.+)"}', line)
+        if m and m.group(1):
+            dbdir = m.group(1)
+            break
+    if not dbdir:
+        #since 2.0, dbdir is moved to ini file
+        dbdir, prev_ini = get_dbdir(bin_dir)
+
+    if not dbdir:
+        sys.exit("ERROR: no previously configured dbdir")
+    if not os.path.isdir(dbdir):
+        sys.exit("ERROR: dbdir is not a directory: " + dbdir)
+
+    if dbdir_file:
+       dbdir_fp = open(dbdir_file, 'w')
+       print >>dbdir_fp, dbdir
+       dbdir_fp.close()
+       print("Db directory: " + dbdir)
+       sys.exit(0)
+
+    # ----------------------------------------------------
+
+    buckets = subprocess.Popen([escript_cmd,
+                                os.path.join(bin_dir, "cbdump-config"),
+                                prev_cfg, "buckets", "membase"],
+                               stdout=subprocess.PIPE).communicate()[0]
+    buckets = string.strip(buckets)
+    if len(buckets) <= 0:
+        buckets = []
+    else:
+        buckets = buckets.split("\n")
+
+    if buckets:
+        bucket = buckets[0]
+        bucket_path = os.path.join(dbdir, bucket + "-data")
+        bucket_dir_1_8_x = os.path.join(dbdir, bucket + "-data")
+        bucket_dir_2_0_x = os.path.join(dbdir, bucket)
+        if os.path.isfile(os.path.join(bucket_dir_1_8_x, bucket)) or\
+           os.path.isdir(bucket_dir_1_8_x):
+            if os.path.isfile(os.path.join(bucket_dir_2_0_x, bucket)) or\
+               os.path.isdir(bucket_dir_2_0_x):
+                print("Upgrading from 1.8.x to 2.0 to 2.0.x")
+            else:
+                print("Upgrading your Couchbase Server from 1.8.x to " + string.strip(ver) + ".")
+                print("  NOTE: all item data will be read from 1.8.x sqlite database files")
+                print("  and converted to new files in 2.0 couchstore file format.  This can")
+                print("  be a lengthy, slow operation for large datasets and/or fragmented")
+                print("  database files.")
+        else:
+            print("Upgrading from 2.0")
+    else:
+        print("No buckets to be upgraded.")
+
+    buckets_lcase = {}
+    buckets_total = 0
+    for bucket in buckets:
+        bucket_path = os.path.join(dbdir, bucket + "-data")
+
+
+        if bucket.lower() in buckets_lcase:
+            sys.exit("ERROR: bucket " + bucket \
+                     + " has a case-insensitive match with another bucket name." \
+                     + " Please first rename the bucket before upgrading.")
+        buckets_lcase[bucket.lower()] = True
+
+        for path in bucket_files(bucket_path, bucket):
+            if os.path.isfile(path):
+                buckets_total = buckets_total + os.path.getsize(path)
+
+    # ----------------------------------------------------
+
+    # TODO: Ensure Couchbase isn't running.
+    # TODO: Can I write to the right directories?
+    # TODO: linux: Am I running as the right user?
+    # TODO: linux: Can I sudo to the right user?
+    # TODO: linux: chmod of created files and directories.
+    # TODO: Rollback files if there was an error.
+
+    # ----------------------------------------------------
+
+    confirm(prefix_dir, prev_cfg_dir, prev_cfg, prev_ip,
+            dbdir, buckets)
+
+    # ----------------------------------------------------
+
+    print("\nChecking disk space available for buckets in directory:\n  " + dbdir)
+
+    want = buckets_total * space_needed_factor
+    avail = get_free_space(dbdir)
+    if avail < 0:
+        sys.exit("ERROR: unable to retrieve amount of free disk space")
+
+    print("  Free disk bucket space wanted: " + str(want))
+    print("  Free disk bucket space available: " + str(avail))
+    print("  Free disk space factor: " + str(space_needed_factor))
+
+    if avail < want:
+        sys.exit("ERROR: not enough free disk space" \
+                 + " in " + dbdir + " directory." \
+                 + " Consider using the -s flag to supply" \
+                 + " a different free disk space needed factor.")
+
+    print("  Ok.")
+
+    # ----------------------------------------------------
+
+    print("\nAnalysis complete.")
+
+    if dry_run:
+        prompt("Proceed with config & data upgrade steps? [yes|no]")
+    else:
+        prompt("Proceed with config & data upgrade steps (writing new files)? [yes|no]")
+
+    print("")
+
+    upgrade(bin_dir, prefix_dir, prev_cfg_dir, prev_cfg, prev_ip, prev_ini,
+            dbdir, buckets, dry_run=dry_run)
+
+    print("\nDone.")
+
+if __name__ == '__main__':
+    main()

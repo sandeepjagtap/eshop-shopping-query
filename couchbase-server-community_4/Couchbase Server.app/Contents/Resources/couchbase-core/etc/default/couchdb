@@ -1,0 +1,11 @@
+# Sourced by init script for configuration.
+
+COUCHDB_USER=couchbase
+COUCHDB_STDOUT_FILE=/dev/null
+COUCHDB_STDERR_FILE=/dev/null
+COUCHDB_RESPAWN_TIMEOUT=5
+COUCHDB_OPTIONS=
+COUCHDB_ADDITIONAL_CONFIG_FILE=/opt/couchbase/etc/runtime.ini
+
+export COUCHDB_ADDITIONAL_CONFIG_FILE
+

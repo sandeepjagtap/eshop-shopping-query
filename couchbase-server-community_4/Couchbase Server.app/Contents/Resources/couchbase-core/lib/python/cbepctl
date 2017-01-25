@@ -1,0 +1,249 @@
+#!/usr/bin/env python
+
+import time
+import sys
+
+import clitool
+import exceptions
+import mc_bin_client
+import memcacheConstants
+import sys
+
+def cmd(f):
+    """Decorate a function with code to authenticate based on 1-2
+    arguments past the normal number of arguments."""
+
+    def g(*args, **kwargs):
+        mc = args[0]
+        n = f.func_code.co_argcount
+
+        bucket = kwargs.get('bucketName', None)
+        password = kwargs.get('password', None) or ""
+
+        if bucket:
+            try:
+                mc.sasl_auth_plain(bucket, password)
+            except mc_bin_client.MemcachedError:
+                print "Authentication error for %s" % bucket
+                sys.exit(1)
+
+        if kwargs.get('allBuckets', None):
+            buckets = mc.stats('bucket')
+            for bucket in buckets.iterkeys():
+                print '*' * 78
+                print bucket
+                print
+                mc.bucket_select(bucket)
+                f(*args[:n])
+        else:
+            f(*args[:n])
+
+    return g
+
+@cmd
+def set_param(mc, type, key, val):
+    engine_param = None
+    if type == 'checkpoint_param':
+        engine_param = memcacheConstants.ENGINE_PARAM_CHECKPOINT
+    elif type == 'flush_param':
+        engine_param = memcacheConstants.ENGINE_PARAM_FLUSH
+    elif type == 'tap_param':
+        engine_param = memcacheConstants.ENGINE_PARAM_TAP
+    else:
+        print 'Error: Bad parameter %s' % type
+
+    if key == 'replication_throttle_queue_cap' and val == 'infinite':
+        val = '-1'
+
+    if key == 'exp_pager_initial_run_time' and val == 'disable':
+        val = '-1'
+
+    if key == "mem_high_wat" or key == "mem_low_wat":
+        if val.endswith("%"):
+            _x_ = (val[:len(val)-1])
+            if not _x_.isdigit():
+                print 'Error: Invalid parameter %s' % val
+                return
+            if float(_x_) > 100:
+                print 'Error: Bad parameter %s' % val
+                return
+            _quota_ = int(mc.stats()['ep_max_size'])
+            val = str(int(float(_x_)*(_quota_)/100))
+
+    try:
+        mc.set_param(key, val, engine_param)
+        print 'set %s to %s' %(key, val)
+    except mc_bin_client.MemcachedError, error:
+        print 'Error: %s' % error.msg
+    except mc_bin_client.TimeoutError, error:
+        print error
+    except Exception, e:
+        print 'Generic error (%s)' % e
+
+@cmd
+def stop(mc):
+    try:
+        mc.stop_persistence()
+        stopped = False
+        while not stopped:
+            time.sleep(0.5)
+            try:
+                stats = mc.stats()
+                success = True
+            except:
+                if success:
+                    mc = mc_bin_client.MemcachedClient(mc.host, mc.port)
+                    raise
+                else:
+                    raise
+            success = False
+            if stats['ep_flusher_state'] == 'paused':
+                stopped = True
+        print 'Persistence stopped'
+    except mc_bin_client.MemcachedError, error:
+        print 'Error: %s' % error.msg
+    except mc_bin_client.TimeoutError, error:
+        print error
+    except Exception, e:
+        print 'Generic error (%s)' % e
+
+@cmd
+def start(mc):
+    try:
+        mc.start_persistence()
+        print 'Persistence started'
+    except mc_bin_client.MemcachedError, error:
+        print 'Error: %s' % error.msg
+    except mc_bin_client.TimeoutError, error:
+        print error
+    except Exception, e:
+        print 'Generic error (%s)' % e
+
+@cmd
+def drain(mc):
+    try:
+        while True:
+            s = mc.stats()
+            if s['ep_queue_size'] == "0":
+                print("done")
+                return
+            time.sleep(2)
+            sys.stdout.write('.')
+            sys.stdout.flush()
+        print 'Write queues drained'
+    except mc_bin_client.MemcachedError, error:
+        print 'Error: %s' % error.msg
+    except mc_bin_client.TimeoutError, error:
+        print error
+    except Exception, e:
+        print 'Generic error (%s)' % e
+
+if __name__ == '__main__':
+
+    c = clitool.CliTool("""
+Persistence:
+  stop           - stop persistence
+  start          - start persistence
+  drain          - wait until queues are drained
+
+
+Available params for "set":
+
+  Available params for set checkpoint_param:
+    chk_max_items                - Max number of items allowed in a checkpoint.
+    chk_period                   - Time bound (in sec.) on a checkpoint.
+    item_num_based_new_chk       - true if a new checkpoint can be created based
+                                   on.
+                                   the number of items in the open checkpoint.
+    keep_closed_chks             - true if we want to keep closed checkpoints in
+                                   memory.
+                                   as long as the current memory usage is below
+                                   high water mark.
+    max_checkpoints              - Max number of checkpoints allowed per vbucket.
+    enable_chk_merge             = True if merging closed checkpoints is enabled.
+
+
+  Available params for set flush_param:
+    access_scanner_enabled       - Enable or disable access scanner task (true/false)
+    alog_sleep_time              - Access scanner interval (minute)
+    alog_task_time               - Hour in UTC time when access scanner task is
+                                   next scheduled to run (0-23).
+    backfill_mem_threshold       - Memory threshold (%) on the current bucket quota
+                                   before backfill task is made to back off.
+    bg_fetch_delay               - Delay before executing a bg fetch (test
+                                   feature).
+    bfilter_enabled              - Enable or disable bloom filters (true/false)
+    bfilter_residency_threshold  - Resident ratio threshold below which all items
+                                   will be considered in the bloom filters in full
+                                   eviction policy (0.0 - 1.0)
+    compaction_exp_mem_threshold - Memory threshold (%) on the current bucket quota
+                                   after which compaction will not queue expired
+                                   items for deletion.
+    compaction_write_queue_cap   - Disk write queue threshold after which compaction
+                                   tasks will be made to snooze, if there are already
+                                   pending compaction tasks.
+    dcp_min_compression_ratio    - Minimum compression ratio of compressed doc against
+                                   the original doc. If compressed doc is greater than
+                                   this percentage of the original doc, then the doc
+                                   will be shipped as is by the DCP producer if value
+                                   compression is enabled by the DCP consumer. Applies
+                                   to all producers (Ideal range: 0.0 - 1.0)
+    defragmenter_enabled         - Enable or disable the defragmenter
+                                   (true/false).
+    defragmenter_interval        - How often defragmenter task should be run
+                                   (in seconds).
+    defragmenter_age_threshold   - How old (measured in number of defragmenter
+                                   passes) must a document be to be considered
+                                   for defragmentation.
+    defragmenter_chunk_duration  - Maximum time (in ms) defragmentation task
+                                   will run for before being paused (and
+                                   resumed at the next defragmenter_interval).
+    exp_pager_enabled            - Enable expiry pager.
+    exp_pager_stime              - Expiry Pager Sleeptime.
+    exp_pager_initial_run_time   - Expiry Pager first task time (UTC)
+                                   (Range: 0 - 23, Specify 'disable' to not delay the
+                                   the expiry pager, in which case first run will be
+                                   after exp_pager_stime seconds.)
+    flushall_enabled             - Enable flush operation.
+    pager_active_vb_pcnt         - Percentage of active vbuckets items among
+                                   all ejected items by item pager.
+    max_size                     - Max memory used by the server.
+    mem_high_wat                 - High water mark (suffix with '%' to make it a
+                                   percentage of the RAM quota)
+    mem_low_wat                  - Low water mark. (suffix with '%' to make it a
+                                   percentage of the RAM quota)
+    mutation_mem_threshold       - Memory threshold (%) on the current bucket quota
+                                   for accepting a new mutation.
+    timing_log                   - path to log detailed timing stats.
+    warmup_min_memory_threshold  - Memory threshold (%) during warmup to enable
+                                   traffic
+    warmup_min_items_threshold   - Item number threshold (%) during warmup to enable
+                                   traffic
+    max_num_readers              - Override default number of global threads that
+                                   prioritize read operations.
+    max_num_writers              - Override default number of global threads that
+                                   prioritize write operations.
+    max_num_auxio                - Override default number of global threads that
+                                   prioritize auxio operations.
+    max_num_nonio                - Override default number of global threads that
+                                   prioritize nonio operations.
+
+  Available params for "set tap_param":
+    tap_keepalive                    - Seconds to hold a named tap connection.
+    replication_throttle_queue_cap   - Max disk write queue size to throttle
+                                       replication streams ('infinite' means no
+                                       cap).
+    replication_throttle_cap_pcnt    - Percentage of total items in write queue
+                                       at which we throttle replication input
+    replication_throttle_threshold   - Percentage of memory in use to throttle
+                                       replication streams.
+    """)
+
+    c.addCommand('drain', drain, "drain")
+    c.addCommand('set', set_param, 'set type param value')
+    c.addCommand('start', start, 'start')
+    c.addCommand('stop', stop, 'stop')
+    c.addFlag('-a', 'allBuckets', 'iterate over all buckets (requires admin u/p)')
+    c.addOption('-b', 'bucketName', 'the bucket to get stats from (Default: default)')
+    c.addOption('-p', 'password', 'the password for the bucket if one exists')
+    c.execute()

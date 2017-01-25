@@ -1,0 +1,10 @@
+{application,ns_babysitter,
+             [{description,"Couchbase server babysitter"},
+              {vsn,"0.0.0"},
+              {modules,[child_erlang,child_ns_server_sup,ns_babysitter,
+                        ns_babysitter_bootstrap,ns_babysitter_sup,
+                        ns_child_ports_sup,ns_crash_log,ns_port_server,
+                        ns_ports_manager,supervisor_cushion]},
+              {registered,[]},
+              {applications,[kernel,stdlib]},
+              {mod,{ns_babysitter,[]}}]}.

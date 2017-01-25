@@ -1,0 +1,6 @@
+{
+  "service": "n1ql",
+  "proxy-strategy": "local",
+  "rest-api-prefix": "query",
+  "doc-root": "query-ui"
+}
